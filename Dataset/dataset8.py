@@ -2,45 +2,45 @@ import pickle
 import random
 import tqdm
 
-# 从文件中读取数据
+# Đọc dữ liệu từ file
 def load_data(filename):
     with open(filename, 'rb') as file:
         return pickle.load(file)
 
-# 保存数据到文件
+# Lưu dữ liệu vào file
 def save_data(data, filename):
     with open(filename, 'wb') as file:
         pickle.dump(data, file)
 
-# 选择和打乱账户
+# Chọn và xáo trộn tài khoản
 def select_and_shuffle_accounts(accounts):
     tag1_accounts = [account for account in accounts.items() if account[1][0]['tag'] == 1]
     tag0_accounts = [account for account in accounts.items() if account[1][0]['tag'] == 0]
     
-    # 随机选择tag为0的账户，数量是tag为1的账户数量的两倍
+    # Chọn ngẫu nhiên các tài khoản có tag là 0, số lượng gấp đôi số lượng tài khoản có tag là 1
     double_tag1_count = random.sample(tag0_accounts, 2 * len(tag1_accounts))
     
-    # 合并并打乱顺序
+    # Gộp và xáo trộn thứ tự
     selected_accounts = tag1_accounts + double_tag1_count
     random.shuffle(selected_accounts)
     
-    # 返回打乱后的字典
+    # Trả về từ điển đã xáo trộn
     return dict(selected_accounts)
 
-# 加载数据
-accounts_data = load_data('transactions7.pkl')
+# Tải dữ liệu
+accounts_data = load_data('/home/ngochv/Dynamic_Feature/data/preprocessed/b4e_processed_data_1/transactions7.pkl')
 
-# 选择和打乱账户
+# Chọn và xáo trộn tài khoản
 shuffled_accounts_data = select_and_shuffle_accounts(accounts_data)
 
-# 保存数据
-save_data(shuffled_accounts_data, 'transactions8.pkl')
+# Lưu dữ liệu
+save_data(shuffled_accounts_data, '/home/ngochv/Dynamic_Feature/data/preprocessed/b4e_processed_data_1/transactions8.pkl')
 
-# 打印每个账户的前十条处理后的交易记录
-print("打印前十个账户的数据:")
-for address, transactions in list(shuffled_accounts_data.items())[:10]:  # 只展示前十个账户的数据
-    print(f"账户 {address}:")
+# In 10 bản ghi giao dịch đã xử lý đầu tiên của mỗi tài khoản
+print("In dữ liệu của 10 tài khoản đầu tiên:")
+for address, transactions in list(shuffled_accounts_data.items())[:10]:  # Chỉ hiển thị dữ liệu của 10 tài khoản đầu tiên
+    print(f"Tài khoản {address}:")
     print(transactions)
     print("\n")
 
-print("数据已被处理，并保存到 transactions8.pkl 中。")
+print("Dữ liệu đã được xử lý và lưu vào transactions8.pkl.")

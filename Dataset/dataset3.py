@@ -1,37 +1,37 @@
 import pickle
 
-# 从文件中读取数据
+# Đọc dữ liệu từ file
 def load_data(filename):
     with open(filename, 'rb') as file:
         return pickle.load(file)
 
-# 保存数据到文件
+# Lưu dữ liệu vào file
 def save_data(data, filename):
     with open(filename, 'wb') as file:
         pickle.dump(data, file)
 
-# 对每个账户的交易数据按时间戳排序
+# Sắp xếp dữ liệu giao dịch của mỗi tài khoản theo dấu thời gian
 def sort_transactions_by_timestamp(accounts):
     sorted_accounts = {}
     for address, transactions in accounts.items():
         sorted_accounts[address] = sorted(transactions, key=lambda x: x['timestamp'])
     return sorted_accounts
 
-# 加载数据
-accounts_data = load_data('transactions2.pkl')
+# Tải dữ liệu
+accounts_data = load_data('/home/ngochv/Dynamic_Feature/data/preprocessed/b4e_processed_data_1/transactions2.pkl')
 
-# 排序数据
+# Sắp xếp dữ liệu
 sorted_accounts_data = sort_transactions_by_timestamp(accounts_data)
 
-# 打印每个账户的前十条排序后的交易记录
-print("打印每个账户的前十条排序后的交易记录:")
-for address in list(sorted_accounts_data.keys())[:10]:  # 只展示前十个账户的数据
-    print(f"账户 {address} 的前十条交易记录:")
-    for transaction in sorted_accounts_data[address][:10]:  # 每个账户显示前十条记录
+# In 10 bản ghi giao dịch đã sắp xếp đầu tiên của mỗi tài khoản
+print("In 10 bản ghi giao dịch đã sắp xếp đầu tiên của mỗi tài khoản:")
+for address in list(sorted_accounts_data.keys())[:10]:  # Chỉ hiển thị dữ liệu của 10 tài khoản đầu tiên
+    print(f"10 bản ghi giao dịch đầu tiên của tài khoản {address}:")
+    for transaction in sorted_accounts_data[address][:10]:  # Hiển thị 10 bản ghi đầu tiên cho mỗi tài khoản
         print(transaction)
     print("\n")
 
-# 保存数据
-save_data(sorted_accounts_data, 'transactions3.pkl')
+# Lưu dữ liệu
+save_data(sorted_accounts_data, '/home/ngochv/Dynamic_Feature/data/preprocessed/b4e_processed_data_1/transactions3.pkl')
 
-print("数据已经按每个账户的时间戳进行排序，并保存到 transactions3.pkl 中。")
+print("Dữ liệu đã được sắp xếp theo dấu thời gian của từng tài khoản và lưu vào transactions3.pkl.")

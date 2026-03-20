@@ -56,7 +56,7 @@ if cfg_ds in ("mr", "sst", "Dataset"):
 tfidf_mode = "only_tf"
 # tfidf_mode='all_tfidf'
 
-# 在clean doc时是否使用bert_tokenizer分词, data3时不用更好
+# Trong clean doc có sử dụng bert_tokenizer để phân từ không, tốt hơn là không dùng cho data3
 cfg_use_bert_tokenizer_at_clean = True
 
 # bert_model_scale='bert-large-uncased'
@@ -136,12 +136,12 @@ elif cfg_ds == "Dataset":
     label2idx = {"0": 0, "1": 1}
     idx2label = {0: "0", 1: "1"}
     train_valid_df = pd.read_csv(
-        "train.tsv", encoding="utf-8", header=0, sep="\t"
+        "/home/ngochv/Dynamic_Feature/data/preprocessed/B4E/train.tsv", encoding="utf-8", header=0, sep="\t"
     )
     train_valid_df = shuffle(train_valid_df)
     # use dev set as test set, because we can not get the ground true label of the real test set.
     test_df = pd.read_csv(
-        "dev.tsv", encoding="utf-8", header=0, sep="\t"
+        "/home/ngochv/Dynamic_Feature/data/preprocessed/B4E/dev.tsv", encoding="utf-8", header=0, sep="\t"
     )
     test_df = shuffle(test_df)
 
@@ -154,11 +154,11 @@ elif cfg_ds == "Dataset":
     )
     df = pd.concat((train_valid_df, test_df))
     corpus = df['sentence']
-    y = df['label'].values  # 使用列名引用
-    # 获得confidence
+    y = df['label'].values  # Sử dụng tên cột để tham chiếu
+    # Lấy confidence
     # y_prob = np.eye(len(y), len(label2idx))[y]
     # corpus_size = len(y)
-    y_prob = np.eye(len(y), len(label2idx))[y.astype(int)]  # 确保y是整数类型
+    y_prob = np.eye(len(y), len(label2idx))[y.astype(int)]  # Đảm bảo y là kiểu số nguyên
     corpus_size = len(y)
 
 
@@ -465,7 +465,7 @@ for key in word_pair_count:
             (1.0 * count / num_window)
             / (1.0 * word_freq_i * word_freq_j / (num_window * num_window))
         )
-        # 保证分子也不为零以避免负无穷的情况
+        # Đảm bảo tử số không bằng 0 để tránh trường hợp âm vô cùng
         if pmi > 0:
             npmi = (log(1.0 * word_freq_i * word_freq_j / (num_window * num_window)) / log(1.0 * count / num_window) - 1)
             if npmi > tmp_max_npmi:
@@ -481,7 +481,7 @@ for key in word_pair_count:
                 vocab_adj_weight.append(npmi)
     else:
         print(f"Warning: Zero frequency for words (i={i}, j={j}) or no windows.")
-    # 使用normalized pmi:
+    # Sử dụng pmi chuẩn hóa:
     # npmi = (
     #     log(1.0 * word_freq_i * word_freq_j / (num_window * num_window))
     #     / log(1.0 * count / num_window)

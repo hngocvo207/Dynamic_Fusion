@@ -23,13 +23,13 @@ def add_n_grams(accounts):
                     transactions[i][gram_key] = transactions[i]['timestamp'] - transactions[i-n+1]['timestamp']
 
 # 加载数据
-accounts_data = load_data('transactions3.pkl')
+accounts_data = load_data('/home/ngochv/Dynamic_Feature/data/preprocessed/b4e_processed_data_1/transactions3.pkl')
 
 # 添加n-gram数据
 add_n_grams(accounts_data)
 
 # 保存数据
-save_data(accounts_data, 'transactions4.pkl')
+save_data(accounts_data, '/home/ngochv/Dynamic_Feature/data/preprocessed/b4e_processed_data_1/transactions4.pkl')
 
 # 打印每个账户的前十条处理后的交易记录
 print("打印每个账户的前十条处理后的交易记录:")
