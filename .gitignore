@@ -23,3 +23,4 @@ data/preprocessed/
 raw_data/**/*_1000K.csv
 ]633;E;{    echo 'raw_data/B4E/phisher_transaction_in.csv'\x3b   echo 'raw_data/B4E/phisher_transaction_out.csv'\x3b } >> .gitignore;57ee1235-203f-4036-8ad6-e1ae52887fd0]633;Craw_data/B4E/phisher_transaction_in.csv
 raw_data/B4E/phisher_transaction_out.csv
+raw_data/B4E/phisher_transaction_in.csv
