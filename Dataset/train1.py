@@ -206,8 +206,47 @@ gcn_adj_list = [normalize_adj(gcn_vocab_adj).tocoo()]
 gcn_adj_list = [sparse_scipy2torch(adj).to(device) for adj in gcn_adj_list]
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
 
 gc.collect()
+
+# ── Load top-10 Spearman graph features ──────────────────────────────────────
+TOP10_FEATURE_NAMES = [
+    "betweenness_centrality",
+    "in_degree",
+    "freq_in_long",
+    "in_degree_centrality",
+    "max_out_amount",
+    "clustering_coefficient",
+    "degree_centrality",
+    "out_degree",
+    "max_in_amount",
+    "avg_out_amount",
+]
+NUM_GRAPH_FEATURES = len(TOP10_FEATURE_NAMES)
+
+features_csv_path = "/home/ngochv/Dynamic_Feature/raw_data/MulDiGraph/features_output_top10.csv"
+features_df = pd.read_csv(features_csv_path)
+
+# Normalize các feature về mean=0, std=1 để ổn định training
+scaler = StandardScaler()
+features_df[TOP10_FEATURE_NAMES] = scaler.fit_transform(
+    features_df[TOP10_FEATURE_NAMES].values
+)
+
+# Tạo lookup dict: node_address (lowercase) → tensor [NUM_GRAPH_FEATURES]
+graph_features_lookup = {
+    row["node"].lower(): torch.tensor(
+        row[TOP10_FEATURE_NAMES].values.astype(np.float32), dtype=torch.float
+    )
+    for _, row in features_df.iterrows()
+}
+# Fallback tensor zeros nếu node không có trong CSV
+zero_features = torch.zeros(NUM_GRAPH_FEATURES, dtype=torch.float)
+
+print(f"  Loaded graph features: {len(graph_features_lookup)} nodes, {NUM_GRAPH_FEATURES} features each")
+print(f"  Feature names: {TOP10_FEATURE_NAMES}")
 
 train_classes_num, train_classes_weight = get_class_count_and_weight(
     train_y, len(label2idx)
@@ -228,7 +267,9 @@ def get_pytorch_dataloader(
     total_resample_size=-1,
 ):
     ds = CorpusDataset(
-        examples, tokenizer, address_to_index, MAX_SEQ_LENGTH, gcn_embedding_dim
+        examples, tokenizer, address_to_index, MAX_SEQ_LENGTH, gcn_embedding_dim,
+        graph_features_lookup=graph_features_lookup,   # ← truyền lookup dict
+        zero_features=zero_features,                   # ← fallback tensor
     )
     if shuffle_choice == 0:  # shuffle==False
         return DataLoader(
@@ -255,7 +296,7 @@ def get_pytorch_dataloader(
             else classes_weight[1]
             if label == 1
             else classes_weight[2]
-            for _, _, _, _, label in dataset
+            for _, _, _, _, label, _ in ds   # ← thêm _ cho graph_features
         ]
         sampler = WeightedRandomSampler(
             weights, num_samples=total_resample_size, replacement=True
@@ -323,9 +364,12 @@ def predict(model, examples, tokenizer, batch_size):
                 _,
                 label_ids,
                 gcn_swop_eye,
+                graph_features,              # ← thêm graph_features
             ) = batch
             score_out = model(
-                gcn_adj_list, gcn_swop_eye, input_ids, segment_ids, input_mask
+                gcn_adj_list, gcn_swop_eye, input_ids,
+                graph_features,              # ← truyền vào model
+                segment_ids, input_mask
             )
             if cfg_loss_criterion == "mse" and do_softmax_before_mse:
                 score_out = torch.nn.functional.softmax(score_out, dim=-1)
@@ -358,10 +402,13 @@ def evaluate(
                 y_prob,
                 label_ids,
                 gcn_swop_eye,
+                graph_features,              # ← thêm graph_features
             ) = batch
             # the parameter label_ids is None, model return the prediction score
             logits = model(
-                gcn_adj_list, gcn_swop_eye, input_ids, segment_ids, input_mask
+                gcn_adj_list, gcn_swop_eye, input_ids,
+                graph_features,              # ← truyền vào model
+                segment_ids, input_mask
             )
 
             if cfg_loss_criterion == "mse":
@@ -451,6 +498,7 @@ if will_train_mode_from_checkpoint and os.path.exists(
         gcn_adj_num=len(gcn_adj_list),
         gcn_embedding_dim=gcn_embedding_dim,
         num_labels=len(label2idx),
+        num_graph_features=NUM_GRAPH_FEATURES,   # ← thêm
     )
     pretrained_dict = checkpoint["model_state"]
     net_state_dict = model.state_dict()
@@ -477,6 +525,7 @@ else:
         gcn_adj_num=len(gcn_adj_list),
         gcn_embedding_dim=gcn_embedding_dim,
         num_labels=len(label2idx),
+        num_graph_features=NUM_GRAPH_FEATURES,   # ← thêm
     )
     prev_save_step = -1
 
@@ -520,10 +569,13 @@ for epoch in range(start_epoch, total_train_epochs):
             y_prob,
             label_ids,
             gcn_swop_eye,
+            graph_features,              # ← thêm graph_features
         ) = batch
 
         logits = model(
-            gcn_adj_list, gcn_swop_eye, input_ids, segment_ids, input_mask
+            gcn_adj_list, gcn_swop_eye, input_ids,
+            graph_features,              # ← truyền vào model
+            segment_ids, input_mask
         )
 
         if cfg_loss_criterion == "mse":
@@ -637,4 +689,3 @@ print(
     % (100 * test_f1_when_valid_best, 100 * test_recall_when_valid_best, 100 * test_precision_when_valid_best)
 )
 wandb.finish()
-
