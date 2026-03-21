@@ -44,7 +44,7 @@ parser.add_argument("--validate_program", action="store_true")
 args = parser.parse_args()
 
 # Initialize WandB
-wandb.login(key="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")
+wandb.login(key="")
 wandb.init(project="Dynamic_Feature_Training_for_multigraph", config=args)
 
 args.ds = args.ds
