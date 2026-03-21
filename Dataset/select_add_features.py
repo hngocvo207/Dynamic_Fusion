@@ -8,13 +8,18 @@ Load thẳng MulDiGraph.pkl → BFS subgraph → Extract 26 features → Lưu CS
   Nhóm 2 — Temporal frequency features  ( 6 features)
   Nhóm 3 — Graph centrality features    ( 8 features)
 
+Tỉ lệ nhãn: phisher : normal = 5:5 (1:1)
+  - Chọn N/2 phishing accounts (is_phisher=True)
+  - Chọn N/2 normal  accounts  (is_phisher=False) — lấy từ các node không nằm
+    trong danh sách phisher_accounts.txt
+
 Cách dùng:
     python pipeline_end2end.py
     python pipeline_end2end.py \
         --input    /home/ngochv/Dynamic_Feature/raw_data/MulDiGraph/MulDiGraph.pkl \
         --phishers /home/ngochv/Dynamic_Feature/raw_data/MulDiGraph/phisher_accounts.txt \
         --output   /home/ngochv/Dynamic_Feature/raw_data/MulDiGraph/features_output.csv \
-        --n 5 --depth 2 --short_window 30 --long_window 180
+        --n 1000 --depth 2 --short_window 30 --long_window 180
 """
 
 import pickle
@@ -68,6 +73,16 @@ def load_phishers(filepath: str, G: nx.MultiDiGraph) -> list:
         sys.exit(1)
 
     return in_graph
+
+
+def load_normals(G: nx.MultiDiGraph, phisher_set: set) -> list:
+    """Lấy tất cả node trong graph KHÔNG thuộc danh sách phisher."""
+    normals = [n for n in G.nodes() if n not in phisher_set]
+    print(f"[✓] Normal accounts trong graph: {len(normals):,} nodes")
+    if not normals:
+        print("[✗] Không tìm thấy normal account nào trong graph.")
+        sys.exit(1)
+    return normals
 
 
 def bfs_subgraph(G: nx.MultiDiGraph, seed: str, depth: int = 2) -> nx.MultiDiGraph:
@@ -133,20 +148,6 @@ def get_node_transactions(G: nx.MultiDiGraph, node):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def extract_basic_features(G: nx.MultiDiGraph, node: str) -> dict:
-    """
-    1.  out_degree          — số giao dịch gửi đi
-    2.  in_degree           — số giao dịch nhận vào
-    3.  direction_ratio     — out / (in + out + ε)
-    4.  max_out_amount      — giá trị giao dịch ra lớn nhất
-    5.  min_out_amount      — giá trị giao dịch ra nhỏ nhất
-    6.  avg_out_amount      — trung bình giao dịch ra
-    7.  max_in_amount       — giá trị giao dịch vào lớn nhất
-    8.  min_in_amount       — giá trị giao dịch vào nhỏ nhất
-    9.  avg_in_amount       — trung bình giao dịch vào
-    10. account_balance     — tổng vào − tổng ra
-    11. lifetime_days       — khoảng thời gian tx đầu → tx cuối (ngày)
-    12. active_days         — số ngày riêng biệt có ít nhất 1 giao dịch
-    """
     out_txs, in_txs = get_node_transactions(G, node)
 
     out_amounts = [t["amount"] for t in out_txs]
@@ -196,17 +197,6 @@ def extract_basic_features(G: nx.MultiDiGraph, node: str) -> dict:
 def extract_temporal_features(G: nx.MultiDiGraph, node: str,
                                short_window: int = 30,
                                long_window:  int = 180) -> dict:
-    """
-    Mốc thời gian = ngày giao dịch MỚI NHẤT trong account (tránh bias dataset cũ).
-    Cửa sổ: short = `short_window` ngày (default 30) | long = `long_window` ngày (default 180)
-
-    1.  freq_out_short        — số tx ra trong short window / short_window
-    2.  freq_in_short         — số tx vào trong short window / short_window
-    3.  freq_out_long         — số tx ra trong long  window / long_window
-    4.  freq_in_long          — số tx vào trong long  window / long_window
-    5.  short_long_out_ratio  — freq_out_short / (freq_out_long + ε)
-    6.  short_long_in_ratio   — freq_in_short  / (freq_in_long  + ε)
-    """
     out_txs, in_txs = get_node_transactions(G, node)
 
     all_ts = [t["timestamp"] for t in out_txs + in_txs if t["timestamp"] is not None]
@@ -221,7 +211,6 @@ def extract_temporal_features(G: nx.MultiDiGraph, node: str,
         out_long  = sum(1 for t in out_txs if t["timestamp"] and t["timestamp"] >= long_cut)
         in_long   = sum(1 for t in in_txs  if t["timestamp"] and t["timestamp"] >= long_cut)
     else:
-        # Không có timestamp → proxy bằng tổng tx / window
         out_short = out_long  = len(out_txs)
         in_short  = in_long   = len(in_txs)
 
@@ -246,20 +235,6 @@ def extract_temporal_features(G: nx.MultiDiGraph, node: str,
 
 def extract_centrality_features(G: nx.MultiDiGraph, node: str,
                                   katz_alpha: float = 0.005) -> dict:
-    """
-    MultiDiGraph → weighted DiGraph (weight = tổng ETH) → NetworkX centrality APIs.
-    Betweenness dùng k=500 approximation nếu graph > 5,000 nodes.
-
-    1.  katz_centrality
-    2.  betweenness_centrality
-    3.  degree_centrality
-    4.  closeness_centrality
-    5.  clustering_coefficient  (trên undirected)
-    6.  eigenvector_centrality
-    7.  in_degree_centrality
-    8.  out_degree_centrality
-    """
-    # ── Collapse MultiDiGraph → weighted DiGraph ──────────────────────────────
     DG = nx.DiGraph()
     for u, v, data in G.edges(data=True):
         w = float(data.get("value", data.get("amount", data.get("weight", 1.0))) or 1.0)
@@ -274,29 +249,18 @@ def extract_centrality_features(G: nx.MultiDiGraph, node: str,
         try:    return fn()
         except: return default
 
-    # Katz
-    katz_val = safe(lambda: nx.katz_centrality(
+    katz_val  = safe(lambda: nx.katz_centrality(
         DG, alpha=katz_alpha, max_iter=1000, tol=1e-6).get(node, 0.0))
 
-    # Betweenness (approximate nếu lớn)
     k_sample = min(n, 500) if n > 5000 else None
     bet_val  = safe(lambda: nx.betweenness_centrality(
         DG, k=k_sample, normalized=True, weight="weight").get(node, 0.0))
 
-    # Degree
-    deg_val  = safe(lambda: nx.degree_centrality(DG).get(node, 0.0))
-
-    # Closeness
-    clo_val  = safe(lambda: nx.closeness_centrality(DG, u=node))
-
-    # Clustering (undirected)
+    deg_val   = safe(lambda: nx.degree_centrality(DG).get(node, 0.0))
+    clo_val   = safe(lambda: nx.closeness_centrality(DG, u=node))
     clust_val = safe(lambda: nx.clustering(DG.to_undirected(), nodes=node))
-
-    # Eigenvector
-    eig_val  = safe(lambda: nx.eigenvector_centrality(
+    eig_val   = safe(lambda: nx.eigenvector_centrality(
         DG, max_iter=1000, tol=1e-6, weight="weight").get(node, 0.0))
-
-    # In/Out-degree centrality
     in_c_val  = safe(lambda: nx.in_degree_centrality(DG).get(node,  0.0))
     out_c_val = safe(lambda: nx.out_degree_centrality(DG).get(node, 0.0))
 
@@ -336,13 +300,20 @@ FEATURE_GROUPS = {
 }
 
 ALL_FEAT_COLS = [f for grp in FEATURE_GROUPS.values() for f in grp]
-META_COLS     = ["node","sample_idx","n_nodes","n_edges","is_phisher"]
+META_COLS     = ["node","sample_idx","label","n_nodes","n_edges","is_phisher"]
 
 
 def print_summary(df: pd.DataFrame):
     sep = "╌" * 70
+    phisher_count = df["is_phisher"].sum() if "is_phisher" in df.columns else "?"
+    normal_count  = len(df) - phisher_count if isinstance(phisher_count, (int, np.integer)) else "?"
+
     print(f"\n{'═'*70}")
-    print(f"  FEATURE EXTRACTION SUMMARY  —  {len(df)} account(s),  {len(ALL_FEAT_COLS)} features")
+    print(f"  FEATURE EXTRACTION SUMMARY")
+    print(f"  Tổng: {len(df)} accounts  |  "
+          f"Phisher: {phisher_count}  |  Normal: {normal_count}  |  "
+          f"Ratio: 5:5")
+    print(f"  Features: {len(ALL_FEAT_COLS)}")
     print(f"{'═'*70}")
     for grp_name, feats in FEATURE_GROUPS.items():
         cols = [f for f in feats if f in df.columns]
@@ -357,12 +328,48 @@ def print_summary(df: pd.DataFrame):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# HELPER: Xử lý 1 seed node
+# ══════════════════════════════════════════════════════════════════════════════
+
+def process_seed(G, seed, idx, total, is_phisher, depth, short_window, long_window, katz_alpha):
+    label_str = "PHISHER" if is_phisher else "NORMAL "
+    print(f"\n  ── Sample {idx}/{total} [{label_str}]: {str(seed)[:40]}… ──")
+
+    print(f"     [3] BFS subgraph …", end=" ", flush=True)
+    sub = bfs_subgraph(G, seed, depth=depth)
+    print(f"nodes={sub.number_of_nodes():,}  edges={sub.number_of_edges():,}")
+
+    row = {
+        "node":       seed,
+        "sample_idx": idx,
+        "label":      1 if is_phisher else 0,       # ← nhãn số tiện cho ML
+        "n_nodes":    sub.number_of_nodes(),
+        "n_edges":    sub.number_of_edges(),
+        "is_phisher": is_phisher,
+    }
+
+    print(f"     [4] Nhóm 1: Basic features …",    end=" ", flush=True)
+    row.update(extract_basic_features(sub, seed))
+    print("✓")
+
+    print(f"     [4] Nhóm 2: Temporal features …", end=" ", flush=True)
+    row.update(extract_temporal_features(sub, seed, short_window, long_window))
+    print("✓")
+
+    print(f"     [4] Nhóm 3: Centrality features …", end=" ", flush=True)
+    row.update(extract_centrality_features(sub, seed, katz_alpha))
+    print("✓")
+
+    return row
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN PIPELINE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(
-        description="End-to-End: MulDiGraph.pkl → BFS → 26 features → CSV")
+        description="End-to-End: MulDiGraph.pkl → BFS → 26 features → CSV  (ratio 5:5)")
     parser.add_argument("--input",
         default="/home/ngochv/Dynamic_Feature/raw_data/MulDiGraph/MulDiGraph.pkl",
         help="File pkl gốc (MulDiGraph.pkl)")
@@ -372,7 +379,8 @@ def main():
     parser.add_argument("--output",
         default="/home/ngochv/Dynamic_Feature/raw_data/MulDiGraph/features_output1.csv",
         help="File CSV output")
-    parser.add_argument("--n",            type=int,   default=1000,     help="Số phishing node cần xử lý")
+    parser.add_argument("--n",            type=int,   default=1000,
+        help="Tổng số samples (n/2 phisher + n/2 normal). Nên là số chẵn.")
     parser.add_argument("--depth",        type=int,   default=2,     help="Độ sâu BFS")
     parser.add_argument("--short_window", type=int,   default=30,    help="Short-term window (ngày)")
     parser.add_argument("--long_window",  type=int,   default=180,   help="Long-term window (ngày)")
@@ -388,71 +396,95 @@ def main():
 
     random.seed(args.seed)
 
+    # ── Tính số lượng mỗi nhóm (50:50) ───────────────────────────────────────
+    n_total   = args.n if args.n % 2 == 0 else args.n + 1   # đảm bảo chẵn
+    n_phisher = n_total // 2
+    n_normal  = n_total // 2
+
     print("=" * 60)
-    print("  END-TO-END FEATURE EXTRACTION PIPELINE")
+    print("  END-TO-END FEATURE EXTRACTION PIPELINE  (ratio 5:5)")
+    print("=" * 60)
+    print(f"  Tổng samples   : {n_total}")
+    print(f"  Phisher (label=1): {n_phisher}")
+    print(f"  Normal  (label=0): {n_normal}")
     print("=" * 60)
 
     # ── BƯỚC 1: Load graph gốc ────────────────────────────────────────────────
     print("\n[BƯỚC 1] Load MulDiGraph.pkl …")
     G = load_graph(args.input)
 
-    # ── BƯỚC 2: Load & chọn phishing seeds ───────────────────────────────────
-    print("\n[BƯỚC 2] Load phishing accounts …")
-    phishers = load_phishers(args.phishers, G)
-    seeds    = random.sample(phishers, min(args.n, len(phishers)))
-    print(f"\n[✓] Chọn {len(seeds)} seed nodes (random seed={args.seed}):")
-    for i, s in enumerate(seeds, 1):
-        print(f"    {i}. {s}")
+    # ── BƯỚC 2a: Load phishing seeds ─────────────────────────────────────────
+    print("\n[BƯỚC 2a] Load phishing accounts …")
+    phishers     = load_phishers(args.phishers, G)
+    phisher_set  = set(phishers)
+    phisher_seeds = random.sample(phishers, min(n_phisher, len(phishers)))
 
-    # ── BƯỚC 3 → 5: BFS + Extract features ───────────────────────────────────
+    # ── BƯỚC 2b: Load normal seeds ────────────────────────────────────────────
+    print("\n[BƯỚC 2b] Load normal accounts …")
+    normals      = load_normals(G, phisher_set)
+    normal_seeds = random.sample(normals, min(n_normal, len(normals)))
+
+    # ── Điều chỉnh nếu không đủ dữ liệu ──────────────────────────────────────
+    actual_phisher = len(phisher_seeds)
+    actual_normal  = len(normal_seeds)
+    actual_total   = actual_phisher + actual_normal
+
+    print(f"\n[✓] Số seed thực tế — Phisher: {actual_phisher}  |  Normal: {actual_normal}  |  Tổng: {actual_total}")
+    if actual_phisher != actual_normal:
+        print(f"[!] Cảnh báo: không đủ để đạt 5:5 tuyệt đối, "
+              f"ratio thực = {actual_phisher}:{actual_normal}")
+
+    # ── BƯỚC 3→5: BFS + Extract features ──────────────────────────────────────
     print(f"\n[BƯỚC 3-5] BFS (depth={args.depth}) + Extract features …")
     records = []
+    global_idx = 0
 
-    for idx, seed in enumerate(seeds, 1):
-        print(f"\n  ── Sample {idx}/{len(seeds)}: {seed[:30]}… ──")
-
-        # 3. BFS subgraph
-        print(f"     [3] BFS subgraph …", end=" ", flush=True)
-        sub = bfs_subgraph(G, seed, depth=args.depth)
-        sub.graph.update({"seed": seed, "bfs_depth": args.depth,
-                          "is_phisher": True, "sample_idx": idx})
-        print(f"nodes={sub.number_of_nodes():,}  edges={sub.number_of_edges():,}")
-
-        row = {
-            "node":       seed,
-            "sample_idx": idx,
-            "n_nodes":    sub.number_of_nodes(),
-            "n_edges":    sub.number_of_edges(),
-            "is_phisher": True,
-        }
-
-        # 4. Nhóm 1
-        print(f"     [4] Nhóm 1: Basic features …", end=" ", flush=True)
-        row.update(extract_basic_features(sub, seed))
-        print("✓")
-
-        # 4. Nhóm 2
-        print(f"     [4] Nhóm 2: Temporal features …", end=" ", flush=True)
-        row.update(extract_temporal_features(sub, seed, args.short_window, args.long_window))
-        print("✓")
-
-        # 4. Nhóm 3
-        print(f"     [4] Nhóm 3: Centrality features …", end=" ", flush=True)
-        row.update(extract_centrality_features(sub, seed, args.katz_alpha))
-        print("✓")
-
+    # --- Phisher group ---
+    print(f"\n{'─'*60}")
+    print(f"  [PHISHER GROUP]  {actual_phisher} accounts")
+    print(f"{'─'*60}")
+    for seed in phisher_seeds:
+        global_idx += 1
+        row = process_seed(
+            G, seed, global_idx, actual_total,
+            is_phisher=True,
+            depth=args.depth,
+            short_window=args.short_window,
+            long_window=args.long_window,
+            katz_alpha=args.katz_alpha,
+        )
         records.append(row)
 
-    # ── BƯỚC 6: Lưu CSV ───────────────────────────────────────────────────────
-    print(f"\n[BƯỚC 6] Lưu kết quả …")
+    # --- Normal group ---
+    print(f"\n{'─'*60}")
+    print(f"  [NORMAL GROUP]  {actual_normal} accounts")
+    print(f"{'─'*60}")
+    for seed in normal_seeds:
+        global_idx += 1
+        row = process_seed(
+            G, seed, global_idx, actual_total,
+            is_phisher=False,
+            depth=args.depth,
+            short_window=args.short_window,
+            long_window=args.long_window,
+            katz_alpha=args.katz_alpha,
+        )
+        records.append(row)
+
+    # ── BƯỚC 6: Shuffle & Lưu CSV ─────────────────────────────────────────────
+    print(f"\n[BƯỚC 6] Shuffle & Lưu kết quả …")
     df = pd.DataFrame(records)[META_COLS + ALL_FEAT_COLS]
+    df = df.sample(frac=1, random_state=args.seed).reset_index(drop=True)  # shuffle
     df.to_csv(args.output, index=False)
+
     size_kb = os.path.getsize(args.output) / 1024
     print(f"[✓] Saved → '{args.output}'  ({size_kb:.1f} KB)  shape={df.shape}")
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    print_summary(df[ALL_FEAT_COLS])
-    print(df.to_string(index=False))
+    print_summary(df)
+    print("\n  Phân bố nhãn (label):")
+    print(df["is_phisher"].value_counts().rename({True: "Phisher (1)", False: "Normal (0)"}).to_string())
+    print(f"\n  Ratio: {df['is_phisher'].sum()}:{(~df['is_phisher']).sum()}  ≈  5:5")
     print("\nDone ✓")
 
 
