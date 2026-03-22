@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 import warnings
+import pickle
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # use pytorch_pretrained_bert.modeling for huggingface transformers 0.6.2
@@ -44,11 +45,12 @@ parser.add_argument("--dim", type=int, default="16")
 parser.add_argument("--lr", type=float, default=1e-5)
 parser.add_argument("--l2", type=float, default=0.01)
 parser.add_argument("--model", type=str, default="ETH_GBert")
+parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--validate_program", action="store_true")
 args = parser.parse_args()
 
 # Initialize WandB
-wandb.login(key=os.getenv("WANDB_API_KEY", ""))
+wandb.login(key="")
 wandb.init(project="Dynamic_Feature_Training", config=args)
 
 args.ds = args.ds
@@ -59,7 +61,8 @@ gcn_embedding_dim = args.dim
 learning_rate0 = args.lr
 l2_decay = args.l2
 dataset_list = {"Dataset"}
-total_train_epochs = 20
+total_train_epochs = 50
+
 dropout_rate = 0.2  
 if args.ds == "Dataset":
     batch_size = 8  # Reduced from 16 to prevent OOM
@@ -68,6 +71,7 @@ if args.ds == "Dataset":
 MAX_SEQ_LENGTH = 400 + gcn_embedding_dim
 gradient_accumulation_steps = 1
 bert_model_scale = "bert-base-uncased"  
+
 
 if env_config.TRANSFORMERS_OFFLINE == 1:
     bert_model_scale = os.path.join(
@@ -107,6 +111,7 @@ print(
     f"\n  MAX_SEQ_LENGTH: {MAX_SEQ_LENGTH}",
     f"\n  perform_metrics_str: {perform_metrics_str}",
     f"\n  model_file_4save: {model_file_4save}",
+    f"\n  early_stopping_patience: {args.patience}",
     f"\n  validate_program: {args.validate_program}",
 )
 
@@ -131,7 +136,8 @@ names = [
     "address_to_index",
 ]
 for i in range(len(names)):
-    datafile = "/home/ngochv/Dynamic_Feature/" + data_dir + "/data_%s.%s" % (args.ds, names[i])
+
+    datafile = "/home/iec/uyenvnb/Dynamic_Fusion/" + data_dir + "/data_%s.%s" % (args.ds, names[i])
     with open(datafile, "rb") as f:
         objects.append(pkl.load(f, encoding="latin1"))
 (
@@ -177,9 +183,8 @@ test_examples = [
 
 def load_data(filename):
     with open(filename, 'rb') as file:
-        return pkl.load(file)
-
-weighted_adj_matrix = load_data('/home/ngochv/Dynamic_Feature/data/preprocessed/Multigraph/weighted_adjacency_matrix.pkl')
+        return pickle.load(file)
+weighted_adj_matrix = load_data('/home/iec/uyenvnb/Dynamic_Fusion/data/preprocessed/Multigraph/weighted_adjacency_matrix.pkl')
 
 def adjust_matrix_size(adj_matrix, target_size):
     current_size = adj_matrix.shape[0]
@@ -216,11 +221,21 @@ TOP10_FEATURE_NAMES = [
     "freq_out_short",
     "max_out_amount",
     "in_degree_centrality",
-    "active_days"
+    "active_days",
+    # "degree_centrality",
+    # "avg_out_amount",
+    # "freq_in_short",
+    # "out_degree_centrality",
+    # "max_in_amount",
+    # "lifetime_days",
+    # "closeness_centrality",
+    # "avg_in_amount",
+    # "short_long_in_ratio",
+    # "account_balance"
 ]
 NUM_GRAPH_FEATURES = len(TOP10_FEATURE_NAMES)
 
-features_csv_path = "/home/ngochv/Dynamic_Feature/raw_data/MulDiGraph/features_output_top10.csv"
+features_csv_path = "/home/iec/uyenvnb/Dynamic_Fusion/raw_data/MulDiGraph/features_output_top10.csv"
 features_df = pd.read_csv(features_csv_path)
 
 # Tạo lookup dict: node_address (lowercase) → tensor [NUM_GRAPH_FEATURES]
@@ -500,6 +515,14 @@ global_step_th = int(
 all_loss_list = {"train": [], "valid": [], "test": []}
 all_f1_list = {"train": [], "valid": [], "test": []}
 
+
+early_stopping_patience = max(1, args.patience)
+epochs_without_improvement = 0
+valid_f1_best_epoch = -1
+test_f1_when_valid_best = 0.0
+test_recall_when_valid_best = 0.0
+test_precision_when_valid_best = 0.0
+
 for epoch in range(start_epoch, total_train_epochs):
     tr_loss = 0
     ep_train_start = time.time()
@@ -546,12 +569,21 @@ for epoch in range(start_epoch, total_train_epochs):
             loss = loss / gradient_accumulation_steps
         loss.backward()
 
+        # Gradient clipping to prevent CUDA numeric errors
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         tr_loss += loss.item()
         if (step + 1) % gradient_accumulation_steps == 0:
             optimizer.step()
             optimizer.zero_grad()
             global_step_th += 1
-            
+
+            # Free GPU memory periodically
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            # Free memory every step
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         if step % 40 == 0:
             print(
                 "Epoch:{}-{}/{}, Train {} Loss: {}, Cumulated time: {}m ".format(
@@ -621,8 +653,21 @@ for epoch in range(start_epoch, total_train_epochs):
         test_recall_when_valid_best = test_recall
         test_precision_when_valid_best = test_precision
         valid_f1_best_epoch = epoch
+        epochs_without_improvement = 0
         
         print(f"New best model saved at epoch {epoch} with F1: {perform_metrics:.4f}, Recall: {valid_recall:.4f}, Precision: {valid_precision:.4f}")
+    else:
+        epochs_without_improvement += 1
+        print(
+            f"No improvement for {epochs_without_improvement}/{early_stopping_patience} epoch(s)."
+        )
+    
+    # Check early stopping
+    if epochs_without_improvement >= early_stopping_patience:
+        print(
+            f"Early stopping triggered at epoch {epoch}. Best epoch: {valid_f1_best_epoch}, best valid F1: {perform_metrics_prev:.4f}"
+        )
+        break
 
 print(
     "\n**Optimization Finished!,Total spend:",

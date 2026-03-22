@@ -1,5 +1,6 @@
 import math
 import inspect
+from networkx import degree_centrality
 import torch
 import torch.nn as nn
 import torch.nn.init as init
@@ -26,7 +27,17 @@ TOP10_FEATURE_NAMES = [
     "freq_out_short",
     "max_out_amount",
     "in_degree_centrality",
-    "active_days"
+    "active_days",
+    # "degree_centrality",
+    # "avg_out_amount",
+    # "freq_in_short",
+    # "out_degree_centrality",
+    # "max_in_amount",
+    # "lifetime_days",
+    # "closeness_centrality",
+    # "avg_in_amount",
+    # "short_long_in_ratio",
+    # "account_balance"
 ]
 NUM_GRAPH_FEATURES = len(TOP10_FEATURE_NAMES)   # = 10
 
@@ -135,58 +146,153 @@ class FeatureProjector(nn.Module):
         return feat_emb
 
 
-class DynamicFusionLayer(nn.Module):
-    """
-    Fuse 3 embedding streams với gate động (DiffSoftmax):
-      - Stream 0: bert_embeddings          (BERT token embedding thuần)
-      - Stream 1: gcn_enhanced_embeddings  (BERT + GCN vocab graph)
-      - Stream 2: feature_embeddings       (top-10 Spearman graph features)
+# class DynamicFusionLayer(nn.Module):
+#     """
+#     Fuse 3 embedding streams với gate động (DiffSoftmax):
+#       - Stream 0: bert_embeddings          (BERT token embedding thuần)
+#       - Stream 1: gcn_enhanced_embeddings  (BERT + GCN vocab graph)
+#       - Stream 2: feature_embeddings       (top-10 Spearman graph features)
 
-    Gate network nhận concat([bert, gcn, feat]) → [B, seq_len, 3 gates]
-    """
-    def __init__(self, hidden_dim: int, tau: float = 1.0, hard_gate: bool = False):
-        super().__init__()
+#     Gate network nhận concat([bert, gcn, feat]) → [B, seq_len, 3 gates]
+#     """
+#     def __init__(self, hidden_dim: int, tau: float = 1.0, hard_gate: bool = False):
+#         super().__init__()
+#         self.hidden_dim = hidden_dim
+#         self.tau = tau
+#         self.hard_gate = hard_gate
+
+#         # Input: concat 3 streams → hidden_dim * 3
+#         self.gate_network = nn.Sequential(
+#             nn.Linear(hidden_dim * 3, hidden_dim),   # ← hidden_dim*3
+#             nn.ReLU(),
+#             nn.Linear(hidden_dim, 3),
+#         )
+
+#         self.fusion_weight = nn.Parameter(torch.tensor(0.5))
+
+#     def forward(
+#         self,
+#         bert_embeddings: torch.Tensor,           # [B, seq_len, hidden_dim]
+#         gcn_enhanced_embeddings: torch.Tensor,   # [B, seq_len, hidden_dim]
+#         feature_embeddings: torch.Tensor,        # [B, seq_len, hidden_dim]
+#     ) -> torch.Tensor:
+        
+#         # 1. Gate computation
+#         concat_embeddings = torch.cat(
+#             [bert_embeddings, gcn_enhanced_embeddings, feature_embeddings], dim=-1
+#         )                                                # [B, seq_len, hidden*3]
+
+#         gate_logits = self.gate_network(concat_embeddings)   # [B, seq_len, 3]
+#         gate_values = DiffSoftmax(
+#             gate_logits, tau=self.tau, hard=self.hard_gate, dim=-1
+#         )                                                # [B, seq_len, 3]
+
+#         # 2. Tách 3 gate scalar per token
+#         gate_bert     = gate_values[:, :, 0].unsqueeze(-1)   # [B, seq_len, 1]
+#         gate_gcn      = gate_values[:, :, 1].unsqueeze(-1)
+#         gate_feat     = gate_values[:, :, 2].unsqueeze(-1)
+
+#         # 3. Weighted fusion
+#         fused_embeddings = (
+#             gate_bert * bert_embeddings +
+#             gate_gcn  * gcn_enhanced_embeddings +
+#             gate_feat * feature_embeddings
+#         )                                                # [B, seq_len, hidden_dim]
+
+#         return fused_embeddings
+
+# class DynamicFusionLayer(nn.Module):
+#     def __init__(self, hidden_dim, tau=1.0, hard_gate=False):
+#         super(DynamicFusionLayer, self).__init__()
+#         self.hidden_dim = hidden_dim
+#         self.tau = tau
+#         self.hard_gate = hard_gate
+
+#         # Mạng gate gốc của tác giả (chỉ nhận BERT và GCN)
+#         self.gate_network = nn.Sequential(
+#             nn.Linear(hidden_dim * 2, hidden_dim),
+#             nn.ReLU(),
+#             nn.Linear(hidden_dim, 3),
+#         )
+#         self.fusion_weight = nn.Parameter(torch.tensor(0.5))
+
+#         # Lớp học phụ để gộp Features tĩnh vào
+#         self.feature_gate = nn.Sequential(
+#             nn.Linear(hidden_dim * 2, hidden_dim),
+#             nn.Sigmoid() # Trả về giá trị từ 0 -> 1
+#         )
+
+#     def forward(self, bert_embeddings, gcn_enhanced_embeddings, feature_embeddings):
+#         # ---------- BƯỚC 1: CODE GỐC CỦA TÁC GIẢ ----------
+#         concat_bg = torch.cat([bert_embeddings, gcn_enhanced_embeddings], dim=-1)
+#         gate_logits = self.gate_network(concat_bg)
+#         gate_values = DiffSoftmax(gate_logits, tau=self.tau, hard=self.hard_gate, dim=-1)
+
+#         gate_bert = gate_values[:, :, 0].unsqueeze(-1)
+#         gate_gcn  = gate_values[:, :, 1].unsqueeze(-1)
+#         gate_mixed = gate_values[:, :, 2].unsqueeze(-1)
+
+#         embeddings_mixed = self.fusion_weight * bert_embeddings + (1 - self.fusion_weight) * gcn_enhanced_embeddings
+
+#         original_fused = (
+#             gate_bert * bert_embeddings +
+#             gate_gcn * gcn_enhanced_embeddings +
+#             gate_mixed * embeddings_mixed
+#         )
+
+#         # ---------- BƯỚC 2: CỘNG HƯỞNG FEATURE ----------
+#         # Mạng gate sẽ xem xét original_fused và feature_embeddings để quyết định
+#         # nên cộng bao nhiêu % tính năng đồ thị vào kết quả cuối cùng.
+#         concat_all = torch.cat([original_fused, feature_embeddings], dim=-1)
+#         alpha = self.feature_gate(concat_all) # alpha có shape [B, seq_len, hidden_dim]
+
+#         # Kết hợp mềm
+#         final_fused = (1 - alpha) * original_fused + alpha * feature_embeddings
+
+#         return final_fused
+
+class DynamicFusionLayer(nn.Module):
+    def __init__(self, hidden_dim, tau=1.0, hard_gate=False):
+        super(DynamicFusionLayer, self).__init__()
         self.hidden_dim = hidden_dim
         self.tau = tau
         self.hard_gate = hard_gate
 
-        # Input: concat 3 streams → hidden_dim * 3
         self.gate_network = nn.Sequential(
-            nn.Linear(hidden_dim * 3, hidden_dim),   # ← hidden_dim*3
+            nn.Linear(hidden_dim * 3, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 3),
+            nn.Linear(hidden_dim, 4), # 4 cổng
         )
 
-        self.fusion_weight = nn.Parameter(torch.tensor(0.5))
+        # 3 trọng số có thể học để pha trộn luồng thứ 4
+        self.fusion_weights = nn.Parameter(torch.ones(3)) 
 
-    def forward(
-        self,
-        bert_embeddings: torch.Tensor,           # [B, seq_len, hidden_dim]
-        gcn_enhanced_embeddings: torch.Tensor,   # [B, seq_len, hidden_dim]
-        feature_embeddings: torch.Tensor,        # [B, seq_len, hidden_dim]
-    ) -> torch.Tensor:
-        
-        # 1. Gate computation
-        concat_embeddings = torch.cat(
-            [bert_embeddings, gcn_enhanced_embeddings, feature_embeddings], dim=-1
-        )                                                # [B, seq_len, hidden*3]
+    def forward(self, bert_embeddings, gcn_enhanced_embeddings, feature_embeddings):
+        concat_embeddings = torch.cat([bert_embeddings, gcn_enhanced_embeddings, feature_embeddings], dim=-1)
 
-        gate_logits = self.gate_network(concat_embeddings)   # [B, seq_len, 3]
-        gate_values = DiffSoftmax(
-            gate_logits, tau=self.tau, hard=self.hard_gate, dim=-1
-        )                                                # [B, seq_len, 3]
+        gate_logits = self.gate_network(concat_embeddings)
+        gate_values = DiffSoftmax(gate_logits, tau=self.tau, hard=self.hard_gate, dim=-1)
 
-        # 2. Tách 3 gate scalar per token
-        gate_bert     = gate_values[:, :, 0].unsqueeze(-1)   # [B, seq_len, 1]
-        gate_gcn      = gate_values[:, :, 1].unsqueeze(-1)
-        gate_feat     = gate_values[:, :, 2].unsqueeze(-1)
+        # Tách 4 cổng
+        gate_bert  = gate_values[:, :, 0].unsqueeze(-1)
+        gate_gcn   = gate_values[:, :, 1].unsqueeze(-1)
+        gate_feat  = gate_values[:, :, 2].unsqueeze(-1)
+        gate_mixed = gate_values[:, :, 3].unsqueeze(-1)
 
-        # 3. Weighted fusion
+        # Tạo luồng mixed bằng cách softmax trọng số (để tổng = 1)
+        w = torch.softmax(self.fusion_weights, dim=0)
+        embeddings_mixed = (
+            w[0] * bert_embeddings + 
+            w[1] * gcn_enhanced_embeddings + 
+            w[2] * feature_embeddings
+        )
+
         fused_embeddings = (
             gate_bert * bert_embeddings +
-            gate_gcn  * gcn_enhanced_embeddings +
-            gate_feat * feature_embeddings
-        )                                                # [B, seq_len, hidden_dim]
+            gate_gcn * gcn_enhanced_embeddings +
+            gate_feat * feature_embeddings +
+            gate_mixed * embeddings_mixed
+        )
 
         return fused_embeddings
 
