@@ -1,5 +1,4 @@
 import re
-
 import numpy as np
 import scipy.sparse as sp
 import torch
@@ -19,7 +18,6 @@ from torch.utils.data.distributed import DistributedSampler
 """
 General functions
 """
-
 
 def del_http_user_tokenize(tweet):
     space_pattern = r"\s+"
@@ -87,7 +85,6 @@ def get_class_count_and_weight(y, n_classes):
 """
 Functions and Classes for read and organize data set
 """
-
 
 class InputExample(object):
     def __init__(self, guid, text_a, text_b=None, confidence=None, label=None):
@@ -167,17 +164,21 @@ class CorpusDataset(Dataset):
         self,
         examples,
         tokenizer,
-        address_to_index,            # ← tên đúng, dùng nhất quán
+        address_to_index,            
         max_seq_len,
         gcn_embedding_dim,
-        graph_features_lookup=None,  # lookup dict: node_addr → tensor[10]
-        zero_features=None,          # fallback khi node không có trong CSV
+        graph_features_lookup=None,  
+        zero_features=None,          
     ):
         self.examples = examples
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.gcn_embedding_dim = gcn_embedding_dim
-        self.gcn_vocab_map = address_to_index          # ← FIX: gán đúng tham số
+        self.gcn_vocab_map = address_to_index          
+        
+        # SỬA LỖI: Tạo từ điển ánh xạ ngược (Index -> Chuỗi địa chỉ 0x...)
+        self.index_to_address = {v: str(k).lower() for k, v in address_to_index.items()}
+
         self.graph_features_lookup = graph_features_lookup or {}
         self.zero_features = (
             zero_features if zero_features is not None
@@ -198,8 +199,10 @@ class CorpusDataset(Dataset):
             self.gcn_embedding_dim,
         )
 
-        # Lookup graph features theo node address (guid của example)
-        node_addr = str(ex.guid).lower()
+        # SỬA LỖI: Ánh xạ guid (số nguyên) thành địa chỉ ví (0x...) để Lookup
+        node_idx = int(ex.guid)
+        node_addr = self.index_to_address.get(node_idx, "")
+        
         graph_feat = self.graph_features_lookup.get(node_addr, self.zero_features)
 
         return (
@@ -215,7 +218,7 @@ class CorpusDataset(Dataset):
     def pad(self, batch):
         gcn_vocab_size = len(self.gcn_vocab_map)
 
-        # Tách graph_features ra trước, xử lý riêng
+        # KỸ THUẬT RẤT HAY: Bóc phần tử số 7 ra trước
         *others, graph_features = zip(*batch)
         batch_core = list(zip(*others))
 
@@ -239,7 +242,6 @@ class CorpusDataset(Dataset):
 
         batch_gcn_vocab_ids_paded = np.array(f_pad2(5, maxlen)).reshape(-1)
 
-        # one_hot thay vì tạo ma trận đơn vị lớn
         batch_gcn_vocab_ids_paded[batch_gcn_vocab_ids_paded == -1] = gcn_vocab_size
         indices = torch.tensor(batch_gcn_vocab_ids_paded, dtype=torch.long)
         batch_gcn_swop_eye = F.one_hot(indices, num_classes=gcn_vocab_size + 1).float()
@@ -249,7 +251,7 @@ class CorpusDataset(Dataset):
         ).transpose(1, 2)
 
         # Stack graph_features: list of tensor[10] → tensor[B, 10]
-        batch_graph_features = torch.stack(list(graph_features))  # ← FIX: thêm
+        batch_graph_features = torch.stack(list(graph_features))  
 
         return (
             batch_input_ids,
@@ -258,5 +260,5 @@ class CorpusDataset(Dataset):
             batch_confidences,
             batch_label_ids,
             batch_gcn_swop_eye,
-            batch_graph_features,    # ← FIX: trả về đủ 7 phần tử
+            batch_graph_features,    # ← Đảm bảo trả về đủ 7 phần tử
         )

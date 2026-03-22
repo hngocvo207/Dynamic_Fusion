@@ -13,22 +13,20 @@ from pytorch_pretrained_bert.modeling import (
     BertPooler,
 )
 
-
-
-# Top-10 Spearman feature names
-# Thứ tự phải khớp với cột trong CSV (bỏ 'node' và 'is_phisher')
-
+# ---------------------------------------------------------
+# THAY ĐỔI: Cập nhật đúng 10 đặc trưng từ file CSV mới nhất
+# ---------------------------------------------------------
 TOP10_FEATURE_NAMES = [
     "betweenness_centrality",
+    "clustering_coefficient",
     "in_degree",
     "freq_in_long",
-    "in_degree_centrality",
-    "max_out_amount",
-    "clustering_coefficient",
-    "degree_centrality",
     "out_degree",
-    "max_in_amount",
-    "avg_out_amount",
+    "freq_out_long",
+    "freq_out_short",
+    "max_out_amount",
+    "in_degree_centrality",
+    "active_days"
 ]
 NUM_GRAPH_FEATURES = len(TOP10_FEATURE_NAMES)   # = 10
 
@@ -104,10 +102,6 @@ def DiffSoftmax(logits, tau=1.0, hard=False, dim=-1):
     return ret
 
 
-
-# FeatureProjector
-#   Nhận vector đặc trưng đồ thị thô [B, num_features] → chiếu lên không gian hidden_size của BERT → expand sang [B, seq_len, hidden_size] để concat với token embeddings
-
 class FeatureProjector(nn.Module):
     """
     Project top-10 Spearman graph features → BERT hidden space.
@@ -141,9 +135,6 @@ class FeatureProjector(nn.Module):
         return feat_emb
 
 
-
-# DynamicFusionLayer  (cập nhật: nhận thêm feature_embeddings)
-
 class DynamicFusionLayer(nn.Module):
     """
     Fuse 3 embedding streams với gate động (DiffSoftmax):
@@ -152,10 +143,6 @@ class DynamicFusionLayer(nn.Module):
       - Stream 2: feature_embeddings       (top-10 Spearman graph features)
 
     Gate network nhận concat([bert, gcn, feat]) → [B, seq_len, 3 gates]
-
-    THAY ĐỔI so với version cũ:
-      • gate_network input: hidden_size * 2  →  hidden_size * 3
-      • forward() nhận thêm tham số feature_embeddings
     """
     def __init__(self, hidden_dim: int, tau: float = 1.0, hard_gate: bool = False):
         super().__init__()
@@ -165,12 +152,11 @@ class DynamicFusionLayer(nn.Module):
 
         # Input: concat 3 streams → hidden_dim * 3
         self.gate_network = nn.Sequential(
-            nn.Linear(hidden_dim * 3, hidden_dim),   # ← sửa từ hidden_dim*2
+            nn.Linear(hidden_dim * 3, hidden_dim),   # ← hidden_dim*3
             nn.ReLU(),
             nn.Linear(hidden_dim, 3),
         )
 
-        # Learnable weight cho weighted-mix stream (bert ↔ gcn)
         self.fusion_weight = nn.Parameter(torch.tensor(0.5))
 
     def forward(
@@ -179,12 +165,8 @@ class DynamicFusionLayer(nn.Module):
         gcn_enhanced_embeddings: torch.Tensor,   # [B, seq_len, hidden_dim]
         feature_embeddings: torch.Tensor,        # [B, seq_len, hidden_dim]
     ) -> torch.Tensor:
-        """
-        Returns:
-            fused_embeddings : [B, seq_len, hidden_dim]
-        """
-        #Gate computation
-        # Concat 3 streams để gate network học cách weigh từng luồng
+        
+        # 1. Gate computation
         concat_embeddings = torch.cat(
             [bert_embeddings, gcn_enhanced_embeddings, feature_embeddings], dim=-1
         )                                                # [B, seq_len, hidden*3]
@@ -194,36 +176,22 @@ class DynamicFusionLayer(nn.Module):
             gate_logits, tau=self.tau, hard=self.hard_gate, dim=-1
         )                                                # [B, seq_len, 3]
 
-        # Tách 3 gate scalar per token
+        # 2. Tách 3 gate scalar per token
         gate_bert     = gate_values[:, :, 0].unsqueeze(-1)   # [B, seq_len, 1]
         gate_gcn      = gate_values[:, :, 1].unsqueeze(-1)
         gate_feat     = gate_values[:, :, 2].unsqueeze(-1)
 
-        #3 embedding streams ─────
-        emb_bert = bert_embeddings                           # stream 0: BERT only
-        emb_gcn  = gcn_enhanced_embeddings                   # stream 1: GCN-enhanced
-        emb_feat = feature_embeddings                        # stream 2: graph features
-
-        #Weighted fusion──
+        # 3. Weighted fusion
         fused_embeddings = (
-            gate_bert * emb_bert +
-            gate_gcn  * emb_gcn  +
-            gate_feat * emb_feat
-        )                                                    # [B, seq_len, hidden_dim]
+            gate_bert * bert_embeddings +
+            gate_gcn  * gcn_enhanced_embeddings +
+            gate_feat * feature_embeddings
+        )                                                # [B, seq_len, hidden_dim]
 
         return fused_embeddings
 
 
-
-# ETH_GBertEmbeddings  (cập nhật: thêm FeatureProjector)
-
 class ETH_GBertEmbeddings(BertEmbeddings):
-    """
-    THAY ĐỔI so với version cũ:
-      • Thêm self.feature_projector (FeatureProjector)
-      • forward() nhận thêm tham số graph_features [B, num_features]
-      • Truyền feature_embeddings vào DynamicFusionLayer
-    """
     def __init__(
         self,
         config,
@@ -248,7 +216,7 @@ class ETH_GBertEmbeddings(BertEmbeddings):
             hidden_size=config.hidden_size,
         )
 
-        # DynamicFusionLayer (gate nhận hidden*3 bây giờ)
+        # DynamicFusionLayer
         self.dynamic_fusion_layer = DynamicFusionLayer(config.hidden_size)
 
     def forward(
@@ -256,14 +224,14 @@ class ETH_GBertEmbeddings(BertEmbeddings):
         vocab_adj_list,
         gcn_swop_eye,
         input_ids,
-        graph_features,              # [B, num_graph_features] – top-10 Spearman
+        graph_features,              # [B, num_graph_features]
         token_type_ids=None,
         attention_mask=None,
     ):
-        #BERT word embeddings ────
+        # BERT word embeddings 
         words_embeddings = self.word_embeddings(input_ids)   # [B, seq_len, hidden]
 
-        #GCN-enhanced embeddings ─
+        # GCN-enhanced embeddings 
         vocab_input   = gcn_swop_eye.matmul(words_embeddings).transpose(1, 2)
         gcn_vocab_out = self.vocab_gcn(vocab_adj_list, vocab_input)
 
@@ -274,19 +242,18 @@ class ETH_GBertEmbeddings(BertEmbeddings):
             ) + torch.arange(0, input_ids.shape[0]).to(input_ids.device) * input_ids.shape[1]
             gcn_words_embeddings.flatten(start_dim=0, end_dim=1)[tmp_pos, :] = gcn_vocab_out[:, :, i]
 
-        #Graph feature embeddings 
-        # graph_features : [B, 10]  →  [B, seq_len, hidden_size]
+        # Graph feature embeddings 
         seq_len = input_ids.size(1)
         feature_embeddings = self.feature_projector(graph_features, seq_len)
 
-        #Dynamic fusion (3 streams) 
+        # Dynamic fusion (3 streams) 
         new_words_embeddings = self.dynamic_fusion_layer(
             bert_embeddings=words_embeddings,
             gcn_enhanced_embeddings=gcn_words_embeddings,
             feature_embeddings=feature_embeddings,
         )                                                    # [B, seq_len, hidden]
 
-        #Position + token-type embeddings (BERT standard)
+        # Position + token-type embeddings
         position_ids = torch.arange(seq_len, dtype=torch.long, device=input_ids.device)
         position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
         position_embeddings = self.position_embeddings(position_ids)
@@ -301,16 +268,7 @@ class ETH_GBertEmbeddings(BertEmbeddings):
         return embeddings
 
 
-
-# ETH_GBertModel  (cập nhật: truyền graph_features qua toàn bộ forward)
-
 class ETH_GBertModel(BertModel):
-    """
-    THAY ĐỔI so với version cũ:
-      • __init__: truyền num_graph_features xuống ETH_GBertEmbeddings
-      • forward(): nhận thêm tham số graph_features [B, num_features]
-                   và truyền vào self.embeddings(...)
-    """
     def __init__(
         self,
         config,
@@ -346,7 +304,7 @@ class ETH_GBertModel(BertModel):
         vocab_adj_list,
         gcn_swop_eye,
         input_ids,
-        graph_features,                  # [B, num_graph_features]  ← THÊM MỚI
+        graph_features,                  # [B, num_graph_features]
         token_type_ids=None,
         attention_mask=None,
         output_all_encoded_layers=False,
@@ -357,24 +315,24 @@ class ETH_GBertModel(BertModel):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
 
-        #Embedding layer (BERT + GCN + Graph features) 
+        # Embedding layer (BERT + GCN + Graph features) 
         embedding_output = self.embeddings(
             vocab_adj_list,
             gcn_swop_eye,
             input_ids,
-            graph_features,              # ← truyền vào đây
+            graph_features,              # ← Truyền feature vào embedding
             token_type_ids,
             attention_mask,
         )
 
-        #Extended attention mask
+        # Extended attention mask
         extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
         extended_attention_mask = extended_attention_mask.to(
             dtype=next(self.parameters()).dtype
         )
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
-        #Head mask
+        # Head mask
         if head_mask is not None:
             if head_mask.dim() == 1:
                 head_mask = (
@@ -389,7 +347,7 @@ class ETH_GBertModel(BertModel):
         else:
             head_mask = [None] * self.config.num_hidden_layers
 
-        #Encoder
+        # Encoder
         encoder_args = {}
         if 'head_mask' in inspect.signature(self.encoder.forward).parameters:
             encoder_args['head_mask'] = head_mask
@@ -407,7 +365,7 @@ class ETH_GBertModel(BertModel):
         if self.output_attentions:
             all_attentions, encoded_layers = encoded_layers
 
-        #Pooler → classifier
+        # Pooler → classifier
         pooled_output = self.pooler(encoded_layers[-1])
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)

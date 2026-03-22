@@ -8,18 +8,22 @@ import time
 from scipy.sparse import csr_matrix
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+import pandas as pd
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # use pytorch_pretrained_bert.modeling for huggingface transformers 0.6.2
-from pytorch_pretrained_bert.optimization import BertAdam  # , warmup_linear
+from pytorch_pretrained_bert.optimization import BertAdam
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 
-# from tqdm import tqdm, trange
 from sklearn.metrics import f1_score, precision_score, recall_score, classification_report
 import wandb
 
 from env_config import env_config
 from ETH_GBert import ETH_GBertModel
 from utils import *
+
 random.seed(env_config.GLOBAL_SEED)
 np.random.seed(env_config.GLOBAL_SEED)
 torch.manual_seed(env_config.GLOBAL_SEED)
@@ -44,8 +48,8 @@ parser.add_argument("--validate_program", action="store_true")
 args = parser.parse_args()
 
 # Initialize WandB
-wandb.login(key="")
-wandb.init(project="Dynamic_Feature_Training_for_multigraph", config=args)
+wandb.login(key=os.getenv("WANDB_API_KEY", ""))
+wandb.init(project="Dynamic_Feature_Training", config=args)
 
 args.ds = args.ds
 cfg_model_type = args.model
@@ -55,16 +59,15 @@ gcn_embedding_dim = args.dim
 learning_rate0 = args.lr
 l2_decay = args.l2
 dataset_list = {"Dataset"}
-total_train_epochs = 9
-dropout_rate = 0.2  # 0.5 # Dropout rate (1 - keep probability).
+total_train_epochs = 20
+dropout_rate = 0.2  
 if args.ds == "Dataset":
     batch_size = 8  # Reduced from 16 to prevent OOM
-    learning_rate0 = 8e-6  # 2e-5
+    learning_rate0 = 8e-6 
     l2_decay = 0.001
 MAX_SEQ_LENGTH = 400 + gcn_embedding_dim
 gradient_accumulation_steps = 1
-# bert_model_scale='bert-large-uncased' mô hình lớn
-bert_model_scale = "bert-base-uncased"  #mô hình nhỏ
+bert_model_scale = "bert-base-uncased"  
 
 if env_config.TRANSFORMERS_OFFLINE == 1:
     bert_model_scale = os.path.join(
@@ -79,7 +82,7 @@ if not os.path.exists(output_dir):
     os.mkdir(output_dir)
 perform_metrics_str = ["weighted avg", "f1-score"]
 classifier_act_func = nn.ReLU()
-resample_train_set = False  # if mse and resample, then do resample
+resample_train_set = False 
 do_softmax_before_mse = True
 cfg_loss_criterion = "cle"
 model_file_4save = (
@@ -95,14 +98,13 @@ print(
     "\n----- Configure -----",
     f"\n  args.ds: {args.ds}",
     f"\n  stop_words: {cfg_stop_words}",
-    # '\n  Vocab GCN_hidden_dim: 768 -> 1152 -> 768',
     f"\n  Vocab GCN_hidden_dim: vocab_size -> 128 -> {str(gcn_embedding_dim)}",
-    f"\n  Learning_rate0: {learning_rate0}" f"\n  weight_decay: {l2_decay}",
-    f"\n  Loss_criterion {cfg_loss_criterion}"
+    f"\n  Learning_rate0: {learning_rate0}\n  weight_decay: {l2_decay}",
+    f"\n  Loss_criterion {cfg_loss_criterion}",
     f"\n  softmax_before_mse: {do_softmax_before_mse}",
-    f"\n  Dropout: {dropout_rate}"
+    f"\n  Dropout: {dropout_rate}",
     f"\n  gcn_act_func: Relu",
-    f"\n  MAX_SEQ_LENGTH: {MAX_SEQ_LENGTH}",  #'valid_data_taux',valid_data_taux
+    f"\n  MAX_SEQ_LENGTH: {MAX_SEQ_LENGTH}",
     f"\n  perform_metrics_str: {perform_metrics_str}",
     f"\n  model_file_4save: {model_file_4save}",
     f"\n  validate_program: {args.validate_program}",
@@ -114,9 +116,7 @@ Prepare data set
 Load vocabulary adjacent matrix
 """
 print("\n----- Prepare data set -----")
-print(
-    f"  Load/shuffle/seperate {args.ds} dataset, and vocabulary graph adjacent matrix"
-)
+print(f"  Load/shuffle/seperate {args.ds} dataset, and vocabulary graph adjacent matrix")
 
 objects = []
 names = [
@@ -132,7 +132,6 @@ names = [
 ]
 for i in range(len(names)):
     datafile = "/home/ngochv/Dynamic_Feature/" + data_dir + "/data_%s.%s" % (args.ds, names[i])
-  
     with open(datafile, "rb") as f:
         objects.append(pkl.load(f, encoding="latin1"))
 (
@@ -176,13 +175,12 @@ test_examples = [
     ]
 ]
 
-norm_gcn_vocab_adj_list = []
-import numpy as np
-import pickle
 def load_data(filename):
     with open(filename, 'rb') as file:
-        return pickle.load(file)
+        return pkl.load(file)
+
 weighted_adj_matrix = load_data('/home/ngochv/Dynamic_Feature/data/preprocessed/Multigraph/weighted_adjacency_matrix.pkl')
+
 def adjust_matrix_size(adj_matrix, target_size):
     current_size = adj_matrix.shape[0]
     if current_size == target_size:
@@ -196,52 +194,43 @@ def adjust_matrix_size(adj_matrix, target_size):
             [adj_matrix, np.zeros((current_size, target_size - current_size))],
             [np.zeros((target_size - current_size, current_size)), padding]
         ])
-    
     return adj_matrix
 
 adjusted_adj_matrix = adjust_matrix_size(weighted_adj_matrix, gcn_vocab_size)
 
-gcn_vocab_adj = csr_matrix(adjusted_adj_matrix )
+gcn_vocab_adj = csr_matrix(adjusted_adj_matrix)
 gcn_adj_list = [normalize_adj(gcn_vocab_adj).tocoo()]
 gcn_adj_list = [sparse_scipy2torch(adj).to(device) for adj in gcn_adj_list]
-import warnings
-warnings.filterwarnings("ignore", category=UserWarning)
-import pandas as pd
-from sklearn.preprocessing import StandardScaler
 
 gc.collect()
 
 # ── Load top-10 Spearman graph features ──────────────────────────────────────
+# CẬP NHẬT ĐÚNG CÁC TÊN ĐẶC TRƯNG MỚI NHẤT
 TOP10_FEATURE_NAMES = [
     "betweenness_centrality",
+    "clustering_coefficient",
     "in_degree",
     "freq_in_long",
-    "in_degree_centrality",
-    "max_out_amount",
-    "clustering_coefficient",
-    "degree_centrality",
     "out_degree",
-    "max_in_amount",
-    "avg_out_amount",
+    "freq_out_long",
+    "freq_out_short",
+    "max_out_amount",
+    "in_degree_centrality",
+    "active_days"
 ]
 NUM_GRAPH_FEATURES = len(TOP10_FEATURE_NAMES)
 
 features_csv_path = "/home/ngochv/Dynamic_Feature/raw_data/MulDiGraph/features_output_top10.csv"
 features_df = pd.read_csv(features_csv_path)
 
-# Normalize các feature về mean=0, std=1 để ổn định training
-scaler = StandardScaler()
-features_df[TOP10_FEATURE_NAMES] = scaler.fit_transform(
-    features_df[TOP10_FEATURE_NAMES].values
-)
-
 # Tạo lookup dict: node_address (lowercase) → tensor [NUM_GRAPH_FEATURES]
 graph_features_lookup = {
-    row["node"].lower(): torch.tensor(
+    str(row["node"]).lower(): torch.tensor(
         row[TOP10_FEATURE_NAMES].values.astype(np.float32), dtype=torch.float
     )
     for _, row in features_df.iterrows()
 }
+
 # Fallback tensor zeros nếu node không có trong CSV
 zero_features = torch.zeros(NUM_GRAPH_FEATURES, dtype=torch.float)
 
@@ -271,7 +260,7 @@ def get_pytorch_dataloader(
         graph_features_lookup=graph_features_lookup,   # ← truyền lookup dict
         zero_features=zero_features,                   # ← fallback tensor
     )
-    if shuffle_choice == 0:  # shuffle==False
+    if shuffle_choice == 0:  
         return DataLoader(
             dataset=ds,
             batch_size=batch_size,
@@ -279,7 +268,7 @@ def get_pytorch_dataloader(
             num_workers=0,
             collate_fn=ds.pad,
         )
-    elif shuffle_choice == 1:  # shuffle==True
+    elif shuffle_choice == 1:  
         return DataLoader(
             dataset=ds,
             batch_size=batch_size,
@@ -287,7 +276,7 @@ def get_pytorch_dataloader(
             num_workers=0,
             collate_fn=ds.pad,
         )
-    elif shuffle_choice == 2:  # weighted resampled
+    elif shuffle_choice == 2:  
         assert classes_weight is not None
         assert total_resample_size > 0
         weights = [
@@ -296,7 +285,7 @@ def get_pytorch_dataloader(
             else classes_weight[1]
             if label == 1
             else classes_weight[2]
-            for _, _, _, _, label, _ in ds   # ← thêm _ cho graph_features
+            for _, _, _, _, label, _, _ in ds   # ← SỬA LỖI: Nhận 7 biến
         ]
         sampler = WeightedRandomSampler(
             weights, num_samples=total_resample_size, replacement=True
@@ -310,7 +299,6 @@ def get_pytorch_dataloader(
         )
 
 
-# ds size=1 for validating the program
 if args.validate_program:
     train_examples = [train_examples[0]]
     valid_examples = [valid_examples[0]]
@@ -326,8 +314,6 @@ test_dataloader = get_pytorch_dataloader(
     test_examples, tokenizer, batch_size, shuffle_choice=0
 )
 
-
-# total_train_steps = int(len(train_examples) / batch_size / gradient_accumulation_steps * total_train_epochs)
 total_train_steps = int(
     len(train_dataloader) / gradient_accumulation_steps * total_train_epochs
 )
@@ -346,45 +332,9 @@ print("  Num steps = %d" % total_train_steps)
 Train ETH_GBert model
 """
 
-
-def predict(model, examples, tokenizer, batch_size):
-    dataloader = get_pytorch_dataloader(
-        examples, tokenizer, batch_size, shuffle_choice=0
-    )
-    predict_out = []
-    confidence_out = []
-    model.eval()
-    with torch.no_grad():
-        for i, batch in enumerate(dataloader):
-            batch = tuple(t.to(device) for t in batch)
-            (
-                input_ids,
-                input_mask,
-                segment_ids,
-                _,
-                label_ids,
-                gcn_swop_eye,
-                graph_features,              # ← thêm graph_features
-            ) = batch
-            score_out = model(
-                gcn_adj_list, gcn_swop_eye, input_ids,
-                graph_features,              # ← truyền vào model
-                segment_ids, input_mask
-            )
-            if cfg_loss_criterion == "mse" and do_softmax_before_mse:
-                score_out = torch.nn.functional.softmax(score_out, dim=-1)
-            predict_out.extend(score_out.max(1)[1].tolist())
-            confidence_out.extend(score_out.max(1)[0].tolist())
-
-    return np.array(predict_out).reshape(-1), np.array(confidence_out).reshape(
-        -1
-    )
-
-
 def evaluate(
     model, gcn_adj_list, predict_dataloader, batch_size, epoch_th, dataset_name
 ):
-    # print("***** Running prediction *****")
     model.eval()
     predict_out = []
     all_label_ids = []
@@ -404,7 +354,7 @@ def evaluate(
                 gcn_swop_eye,
                 graph_features,              # ← thêm graph_features
             ) = batch
-            # the parameter label_ids is None, model return the prediction score
+            
             logits = model(
                 gcn_adj_list, gcn_swop_eye, input_ids,
                 graph_features,              # ← truyền vào model
@@ -422,7 +372,7 @@ def evaluate(
                     )
                 else:
                     loss = F.cross_entropy(
-                        logits.view(-1, num_classes), label_ids
+                        logits.view(-1, num_classes), label_ids, weight=loss_weight
                     )
             ev_loss += loss.item()
 
@@ -498,7 +448,7 @@ if will_train_mode_from_checkpoint and os.path.exists(
         gcn_adj_num=len(gcn_adj_list),
         gcn_embedding_dim=gcn_embedding_dim,
         num_labels=len(label2idx),
-        num_graph_features=NUM_GRAPH_FEATURES,   # ← thêm
+        num_graph_features=NUM_GRAPH_FEATURES,   
     )
     pretrained_dict = checkpoint["model_state"]
     net_state_dict = model.state_dict()
@@ -525,7 +475,7 @@ else:
         gcn_adj_num=len(gcn_adj_list),
         gcn_embedding_dim=gcn_embedding_dim,
         num_labels=len(label2idx),
-        num_graph_features=NUM_GRAPH_FEATURES,   # ← thêm
+        num_graph_features=NUM_GRAPH_FEATURES,   
     )
     prev_save_step = -1
 
@@ -549,18 +499,20 @@ global_step_th = int(
 
 all_loss_list = {"train": [], "valid": [], "test": []}
 all_f1_list = {"train": [], "valid": [], "test": []}
+
 for epoch in range(start_epoch, total_train_epochs):
     tr_loss = 0
     ep_train_start = time.time()
     model.train()
     optimizer.zero_grad()
-    # for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
+    
     for step, batch in enumerate(train_dataloader):
         if prev_save_step > -1:
             if step <= prev_save_step:
                 continue
         if prev_save_step > -1:
             prev_save_step = -1
+            
         batch = tuple(t.to(device) for t in batch)
         (
             input_ids,
@@ -569,7 +521,7 @@ for epoch in range(start_epoch, total_train_epochs):
             y_prob,
             label_ids,
             gcn_swop_eye,
-            graph_features,              # ← thêm graph_features
+            graph_features,              # ← lấy graph_features
         ) = batch
 
         logits = model(
@@ -584,10 +536,10 @@ for epoch in range(start_epoch, total_train_epochs):
             loss = F.mse_loss(logits, y_prob)
         else:
             if loss_weight is None:
-                loss = F.cross_entropy(logits, label_ids)
+                loss = F.cross_entropy(logits.view(-1, num_classes), label_ids)
             else:
                 loss = F.cross_entropy(
-                    logits.view(-1, num_classes), label_ids, loss_weight
+                    logits.view(-1, num_classes), label_ids, weight=loss_weight
                 )
 
         if gradient_accumulation_steps > 1:
@@ -599,6 +551,7 @@ for epoch in range(start_epoch, total_train_epochs):
             optimizer.step()
             optimizer.zero_grad()
             global_step_th += 1
+            
         if step % 40 == 0:
             print(
                 "Epoch:{}-{}/{}, Train {} Loss: {}, Cumulated time: {}m ".format(
@@ -617,7 +570,7 @@ for epoch in range(start_epoch, total_train_epochs):
          model, gcn_adj_list, valid_dataloader, batch_size, epoch, "Valid_set"
     )
     test_loss, test_acc, test_f1, test_recall, test_precision = evaluate(
-    model, gcn_adj_list, test_dataloader, batch_size, epoch, "Test_set"
+         model, gcn_adj_list, test_dataloader, batch_size, epoch, "Test_set"
     )
 
     all_loss_list["train"].append(tr_loss)
@@ -647,13 +600,10 @@ for epoch in range(start_epoch, total_train_epochs):
         )
     )
     
-    # Clear memory
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # Save a checkpoint
-    # if valid_acc > valid_acc_prev:
     if perform_metrics > perform_metrics_prev:
         to_save = {
             "epoch": epoch,
@@ -666,12 +616,10 @@ for epoch in range(start_epoch, total_train_epochs):
         }
         torch.save(to_save, os.path.join(output_dir, model_file_4save))
         
-        # valid_acc_prev = valid_acc
         perform_metrics_prev = perform_metrics
         test_f1_when_valid_best = test_f1
         test_recall_when_valid_best = test_recall
         test_precision_when_valid_best = test_precision
-        # train_f1_when_valid_best=tr_f1
         valid_f1_best_epoch = epoch
         
         print(f"New best model saved at epoch {epoch} with F1: {perform_metrics:.4f}, Recall: {valid_recall:.4f}, Precision: {valid_precision:.4f}")
