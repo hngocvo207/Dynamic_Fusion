@@ -22,8 +22,11 @@ def remove_fields(accounts, fields):
 # Tải dữ liệu
 accounts_data = load_data('/home/ngochv/Dynamic_Feature/data/preprocessed/b4e_processed_data_1/transactions4.pkl')
 
-# Các trường cần xóa
-fields_to_remove = ['from_address', 'to_address', 'timestamp']
+# Keep from_address and to_address so they appear as tokens in the text corpus.
+# These address tokens are later matched against address_to_index in example2feature,
+# allowing the GCN to produce a meaningful enhanced embedding for each address token.
+# Only remove timestamp — it is a raw epoch integer with no semantic token value.
+fields_to_remove = ['timestamp']
 
 # Xóa trường
 remove_fields(accounts_data, fields_to_remove)

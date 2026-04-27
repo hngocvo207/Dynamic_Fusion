@@ -93,6 +93,8 @@ Get the tweets,y,confidence etc from data file
 print("Get the tweets,y,confidence etc from data file...")
 start = time.time()
 
+account_list = []  # populated in the Dataset branch; kept empty for other datasets
+
 if cfg_ds == "sst":
     from get_sst_data import DataReader
 
@@ -155,9 +157,12 @@ elif cfg_ds == "Dataset":
     df = pd.concat((train_valid_df, test_df))
     corpus = df['sentence']
     y = df['label'].values  # Sử dụng tên cột để tham chiếu
-    # Lấy confidence
-    # y_prob = np.eye(len(y), len(label2idx))[y]
-    # corpus_size = len(y)
+    # account_list[i] is the Ethereum address for the i-th row in the concatenated
+    # dataframe, which will also be the i-th entry in shuffled_clean_docs.
+    # adjust_matrix.py reads this list to build address_to_index with the same
+    # ordering, so that example.guid == address_to_index[address] holds for every
+    # example.  This alignment is required for the GCN token-lookup in utils.py.
+    account_list = df['account'].tolist()
     y_prob = np.eye(len(y), len(label2idx))[y.astype(int)]  # Đảm bảo y là kiểu số nguyên
     corpus_size = len(y)
 
@@ -631,6 +636,13 @@ if will_dump_objects:
         pkl.dump(tfidf_X_list, f)
     with open("./data_%s.shuffled_clean_docs" % cfg_ds, "wb") as f:
         pkl.dump(shuffled_clean_docs, f)
+    if account_list:
+        # account_list[i] aligns with shuffled_clean_docs[i].
+        # adjust_matrix.py uses this to build address_to_index with matching
+        # indices so that the GCN adjacency matrix rows/cols are consistent
+        # with the example ordering seen during training.
+        with open("./data_%s.account_list" % cfg_ds, "wb") as f:
+            pkl.dump(account_list, f)
 
 print("Data prepared, spend %.2f s" % (time.time() - start))
 
