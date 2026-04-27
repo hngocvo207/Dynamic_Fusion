@@ -29,102 +29,180 @@ Run order
                                     weighted_adjacency_matrix.pkl
 """
 
+from __future__ import annotations
+
 import os
 import pickle
+from typing import Dict, List
+
 import numpy as np
-
-
-# ---------------------------------------------------------------------------
-# I/O helpers
-# ---------------------------------------------------------------------------
-
-def load_data(filename):
-    with open(filename, 'rb') as f:
-        return pickle.load(f)
-
-
-def save_data(data, filename):
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    with open(filename, 'wb') as f:
-        pickle.dump(data, f)
 
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
-PROC = '/home/ngochv/Dynamic_Feature/data/preprocessed'
+PROC = "/home/ngochv/Dynamic_Feature/data/preprocessed"
 
-ACCOUNT_LIST_PATH    = f'{PROC}/multi_processed_data/data_Dataset.account_list'
-TRANSACTIONS4_PATH   = f'{PROC}/b4e_processed_data_1/transactions4.pkl'
+ACCOUNT_LIST_PATH = f"{PROC}/multi_processed_data/data_Dataset.account_list"
+TRANSACTIONS4_PATH = f"{PROC}/Multigraph/transactions4.pkl"
 
 # Outputs consumed by train1.py
-ADDR2IDX_OUT         = f'{PROC}/multi_processed_data/data_Dataset.address_to_index'
-ADJ_MATRIX_OUT       = f'{PROC}/Multigraph/weighted_adjacency_matrix.pkl'
+ADDR2IDX_OUT = f"{PROC}/multi_processed_data/data_Dataset.address_to_index"
+ADJ_MATRIX_OUT = f"{PROC}/Multigraph/weighted_adjacency_matrix.pkl"
 
 
 # ---------------------------------------------------------------------------
-# Weight function (n-gram temporal gaps → scalar edge weight)
+# I/O helpers
 # ---------------------------------------------------------------------------
 
-_NGRAM_COEFFS = {'2-gram': 0.1, '3-gram': 0.2, '4-gram': 0.3, '5-gram': 0.4}
+
+def load_data(filename: str):
+    with open(filename, "rb") as fh:
+        return pickle.load(fh)
+
+
+def save_data(data, filename: str) -> None:
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with open(filename, "wb") as fh:
+        pickle.dump(data, fh)
+
+
+# ---------------------------------------------------------------------------
+# Paper-correct α coefficients  (Equation 2)
+# ---------------------------------------------------------------------------
+# N = 4 because we have four n-gram keys: 2-gram, 3-gram, 4-gram, 5-gram.
+# Paper index i runs 1 … N; gram key = i + 1.
+#
+#   harmonic_sum = Σⱼ₌₁ᴺ (1/j) = 1 + 1/2 + 1/3 + 1/4
+#   αᵢ = (1/i) / harmonic_sum
+#
+# Resulting values (approx):
+#   2-gram: 0.4800   3-gram: 0.2400   4-gram: 0.1600   5-gram: 0.1200
+
+_N_GRAMS = 4  # number of n-gram levels used (2-gram … 5-gram)
+_harmonic_sum: float = sum(1.0 / j for j in range(1, _N_GRAMS + 1))
+
+ALPHA: Dict[str, float] = {
+    f"{i + 1}-gram": (1.0 / i) / _harmonic_sum
+    for i in range(1, _N_GRAMS + 1)
+}
+
+print("α coefficients (paper Eq. 2, shorter n-gram → larger weight):")
+for gram_key, alpha_val in ALPHA.items():
+    print(f"  {gram_key}: {alpha_val:.4f}")
+
+
+# ---------------------------------------------------------------------------
+# Edge-weight function  (Equation 3)
+# ---------------------------------------------------------------------------
+
 
 def calculate_weight(transaction: dict) -> float:
-    total = 0.0
-    for key, coeff in _NGRAM_COEFFS.items():
-        if key in transaction:
-            total += transaction[key] * coeff
-    return total
+    """Return wₖ = valueₖ · Σₙ αₙ · ΔTₙ  (paper Eq. 3).
+
+    Parameters
+    ----------
+    transaction:
+        A single transaction dict containing optional keys
+        '2-gram' … '5-gram'  (n-gram temporal gap ΔTₙ, added by dataset4.py)
+        and 'value' (ETH amount transferred).
+
+    Returns
+    -------
+    float
+        Scalar edge weight; 0.0 when value is missing/zero.
+    """
+    value: float = float(transaction.get("value") or 0.0)
+
+    ngram_sum: float = 0.0
+    for gram_key, alpha_n in ALPHA.items():
+        delta_t = transaction.get(gram_key) or 0
+        ngram_sum += alpha_n * float(delta_t)
+
+    return value * ngram_sum
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Step 1 — Load account_list aligned with shuffled_clean_docs
 # ---------------------------------------------------------------------------
 
-# 1. Load the account list that is aligned with shuffled_clean_docs.
-#    This list was saved by BERT_text_data.py after shuffling the TSV rows.
-#    account_list[i] is the Ethereum address for the i-th training example,
-#    so we build address_to_index such that address_to_index[addr] == i.
-print("Loading account_list …")
-account_list = load_data(ACCOUNT_LIST_PATH)
-N = len(account_list)
+print("\nLoading account_list …")
+account_list: List[str] = load_data(ACCOUNT_LIST_PATH)
+N: int = len(account_list)
 
-# Build aligned address_to_index (lowercase keys for robust matching).
-address_to_index = {str(addr).lower(): i for i, addr in enumerate(account_list)}
+# Build address_to_index with lowercase keys for robust hex matching.
+# address_to_index[addr] == i  ⟺  account_list[i] == addr  ⟺  example.guid == i
+address_to_index: Dict[str, int] = {
+    str(addr).lower(): i for i, addr in enumerate(account_list)
+}
 account_set = set(address_to_index.keys())
 
 print(f"  account_list size : {N}")
 
-# 2. Load transactions4 (still contains from_address / to_address before
-#    dataset5.py removes timestamp).
-print("Loading transactions4 …")
-transactions4 = load_data(TRANSACTIONS4_PATH)
+# ---------------------------------------------------------------------------
+# Step 2 — Load transaction data (transactions4 retains from/to addresses
+#           and n-gram gap features added by dataset4.py)
+# ---------------------------------------------------------------------------
 
-# 3. Build the N×N weighted adjacency matrix using the aligned ordering.
-print("Building adjacency matrix …")
+print("Loading transactions4 …")
+transactions4: dict = load_data(TRANSACTIONS4_PATH)
+
+# ---------------------------------------------------------------------------
+# Step 3 — Build the N×N weighted adjacency matrix
+# ---------------------------------------------------------------------------
+
+print(f"Building {N}×{N} adjacency matrix (paper Eq. 3 weights) …")
 adj_matrix = np.zeros((N, N), dtype=np.float32)
 
-edge_count = 0
+edge_count: int = 0
 for account, transactions in transactions4.items():
-    account_lower = str(account).lower()
-    if account_lower not in account_set:
-        continue
+    if str(account).lower() not in account_set:
+        continue  # account was removed by shared undersampling
+
     for tx in transactions:
-        from_addr = str(tx.get('from_address', '')).lower()
-        to_addr   = str(tx.get('to_address',   '')).lower()
-        if from_addr in account_set and to_addr in account_set:
-            fi = address_to_index[from_addr]
-            ti = address_to_index[to_addr]
-            adj_matrix[fi, ti] += calculate_weight(tx)
-            edge_count += 1
+        from_addr = str(tx.get("from_address", "")).lower()
+        to_addr = str(tx.get("to_address", "")).lower()
 
-print(f"  Non-zero edges accumulated : {edge_count}")
-print(f"  Non-zero cells in matrix   : {np.count_nonzero(adj_matrix)}")
+        if from_addr not in account_set or to_addr not in account_set:
+            continue  # one endpoint not in the sampled graph — skip
 
-# 4. Persist outputs.
+        fi = address_to_index[from_addr]
+        ti = address_to_index[to_addr]
+
+        adj_matrix[fi, ti] += calculate_weight(tx)
+        edge_count += 1
+
+print(f"  Transactions processed  : {edge_count}")
+print(f"  Non-zero cells in matrix: {np.count_nonzero(adj_matrix)}")
+
+# ---------------------------------------------------------------------------
+# Step 4 — Persist outputs
+# ---------------------------------------------------------------------------
+
 save_data(address_to_index, ADDR2IDX_OUT)
-save_data(adj_matrix,       ADJ_MATRIX_OUT)
+save_data(adj_matrix, ADJ_MATRIX_OUT)
 
-print(f"\nSaved address_to_index → {ADDR2IDX_OUT}")
-print(f"Saved adjacency matrix → {ADJ_MATRIX_OUT}  shape={adj_matrix.shape}")
+print(f"\nSaved address_to_index  → {ADDR2IDX_OUT}  ({len(address_to_index)} entries)")
+print(f"Saved adjacency matrix  → {ADJ_MATRIX_OUT}  shape={adj_matrix.shape}")
+
+# ---------------------------------------------------------------------------
+# Quick sanity check — print the first non-zero edge weight
+# ---------------------------------------------------------------------------
+
+print("\nWeight formula spot-check (first non-zero cell):")
+found = False
+for i in range(N):
+    nz_cols = np.nonzero(adj_matrix[i])[0]
+    if len(nz_cols):
+        j = nz_cols[0]
+        src = account_list[i]
+        dst = account_list[j]
+        print(f"  A[{i},{j}] = {adj_matrix[i, j]:.6f}")
+        print(f"    {src}  →  {dst}")
+        found = True
+        break
+if not found:
+    print("  WARNING: adjacency matrix is all-zero — check transactions4 path and account overlap.")
+
 print("Done.")
