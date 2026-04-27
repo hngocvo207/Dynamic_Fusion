@@ -71,21 +71,19 @@ def save_data(data, filename: str) -> None:
 # ---------------------------------------------------------------------------
 # Paper-correct α coefficients  (Equation 2)
 # ---------------------------------------------------------------------------
-# N = 4 because we have four n-gram keys: 2-gram, 3-gram, 4-gram, 5-gram.
-# Paper index i runs 1 … N; gram key = i + 1.
+# Paper: αₙ = (1/n) / Σⱼ₌₁ᴺ (1/j),  N = 5 (max n-gram order),  n = 2..5
 #
-#   harmonic_sum = Σⱼ₌₁ᴺ (1/j) = 1 + 1/2 + 1/3 + 1/4
-#   αᵢ = (1/i) / harmonic_sum
+#   harmonic_sum = 1 + 1/2 + 1/3 + 1/4 + 1/5 ≈ 2.2833
 #
 # Resulting values (approx):
-#   2-gram: 0.4800   3-gram: 0.2400   4-gram: 0.1600   5-gram: 0.1200
+#   2-gram: 0.2191   3-gram: 0.1461   4-gram: 0.1096   5-gram: 0.0876
 
-_N_GRAMS = 4  # number of n-gram levels used (2-gram … 5-gram)
-_harmonic_sum: float = sum(1.0 / j for j in range(1, _N_GRAMS + 1))
+_N_MAX = 5  # paper: N = 5 (maximum n-gram order)
+_harmonic_sum: float = sum(1.0 / j for j in range(1, _N_MAX + 1))
 
 ALPHA: Dict[str, float] = {
-    f"{i + 1}-gram": (1.0 / i) / _harmonic_sum
-    for i in range(1, _N_GRAMS + 1)
+    f"{n}-gram": (1.0 / n) / _harmonic_sum
+    for n in range(2, _N_MAX + 1)   # n is the gram number: 2, 3, 4, 5
 }
 
 print("α coefficients (paper Eq. 2, shorter n-gram → larger weight):")
